@@ -5,7 +5,7 @@
 #include <stdarg.h>
 
 // Debug utilities
-// #define DEBUG_MODE
+#define DEBUG_MODE
 void DEBUG(const char* argTypes, ...) {
 #ifdef DEBUG_MODE
   va_list vl;
@@ -42,11 +42,13 @@ class Led;
 class Infrared;
 
 // Defines
-// Distance states
+// Sensor states
 #define NOT_FOUND 0
 #define TOO_FAR 1
 #define TOO_CLOSE 2
 #define APPROPRIATE 3
+#define TOO_LEFT 4
+#define TOO_RIGHT 5
 // Car states
 #define CAR_FORWARD 0
 #define CAR_BACKWARD 1
@@ -55,7 +57,10 @@ class Infrared;
 #define CAR_RIGHT 4
 
 // Global shared variables
-int8_t distanceState;
+int8_t sensorState;
+
+// Locking
+SemaphoreHandle_t sensorStateUpdated;
 
 class Wheel {
   private:
@@ -198,9 +203,9 @@ class UltraSonic {
       return distance;
     }
 
-    // UltraSonic::GetDistanceState()
-    //  Measure 10 times, get average distance, then update distanceState
-    int8_t UpdateDistanceState() {
+    // UltraSonic::UpdateSensorState()
+    //  Measure 10 times, get average distance, then return with new sensorState
+    int8_t UpdateSensorState() {
       float average = 0.0;
       for (int8_t i = 0; i < 10; i++) {
         average += this->Measure();
@@ -253,13 +258,35 @@ class Infrared {
     }
 };
 
-void ultraSonicTask(void* pvParameters) {
+// sensorControlTask
+//  Ultra sonic, infrared control task
+//  signal carControlTask if sensorState changed
+void sensorControlTask(void* pvParameters) {
   // Setup
   UltraSonic* ultraSonic = new UltraSonic(13, 12);
+  Infrared* leftInfrared = new Infrared(2);
+  Infrared* rightInfrared = new Infrared(9);
+  int8_t newState = -1;
 
   // Loop
   for(;;) {
-    distanceState = ultraSonic->UpdateDistanceState();
+    // Detech by ultra sonic
+    newState = ultraSonic->UpdateSensorState();
+
+    // Not found by ultra sonic, then detect by infrareds
+    if (newState == NOT_FOUND) {
+      if (leftInfrared->Detect()) {
+        newState = TOO_LEFT;
+      } else if (rightInfrared->Detect()) {
+        newState = TOO_RIGHT;
+      }
+    }
+
+    // Signal carControlTask
+    if (sensorState != newState) {
+      sensorState = newState;
+      xSemaphoreGive(sensorStateUpdated);
+    }
   }
 }
 
@@ -280,38 +307,40 @@ void lightControlTask(void* pvParameters) {
     } else {
       led->SetBrightness(255);
     }
-    vTaskDelay(10);
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 
-void controlCenterTask(void* pvParameters) {
+void carControlTask(void* pvParameters) {
   // Setup
   Car* car = new Car(5, 4, 3, 6, 7, 8);
-  Infrared* leftInfrared = new Infrared(2);
-  Infrared* rightInfrared = new Infrared(9);
 
   // Loop
   for (;;) {
-    if (distanceState == TOO_CLOSE) {
-      DEBUG("s", "BACK");
-      car->Backward();
-    } else if (distanceState == TOO_FAR) {
-      DEBUG("s", "FORWARD");
-      car->Forward();
-    } else if (distanceState == APPROPRIATE) {
-      DEBUG("s", "STOP");
-      car->Stop();
-    } else {
-      if (leftInfrared->Detect()) {
-        DEBUG("s", "LEFT");
-        car->Left();
-      } else if (rightInfrared->Detect()) {
-        DEBUG("s", "RIGHT");
-        car->Right();
-      } else {
-        DEBUG("s", "STOP");
+    // Wait until sensorState got updated
+    xSemaphoreTake(sensorStateUpdated, portMAX_DELAY);
+
+    switch (sensorState) {
+      case TOO_CLOSE:
+        car->Backward();
+        break;
+      case TOO_FAR:
+        car->Forward();
+        break;
+      case APPROPRIATE:
         car->Stop();
-      }
+        break;
+      case TOO_LEFT:
+        car->Left();
+        break;
+      case TOO_RIGHT:
+        car->Right();
+        break;
+      case NOT_FOUND:
+        car->Stop();
+        break;
+      default:
+        car->Stop();
     }
   }
 }
@@ -319,8 +348,10 @@ void controlCenterTask(void* pvParameters) {
 void setup() {
   Serial.begin(9600);
 
-  xTaskCreate(ultraSonicTask, "UltraSonic", 64, NULL, 1, NULL);
-  xTaskCreate(controlCenterTask, "ControlCenter", 128, NULL, 2, NULL);
+  sensorStateUpdated = xSemaphoreCreateBinary();
+
+  xTaskCreate(sensorControlTask, "SensorControl", 64, NULL, 1, NULL);
+  xTaskCreate(carControlTask, "CarControl", 128, NULL, 1, NULL);
   xTaskCreate(lightControlTask, "LightControl", 64, NULL, 1, NULL);
 }
 
