@@ -5,12 +5,13 @@
 #include <stdarg.h>
 
 // Debug utilities
-#define DEBUG_MODE
-#ifdef DEBUG_MODE
+// #define DEBUG_MODE
 void DEBUG(const char* argTypes, ...) {
+#ifdef DEBUG_MODE
   va_list vl;
   va_start(vl, argTypes);
   for (int i = 0; argTypes[i] != '\0'; i++) {
+    if (i) Serial.print(", ");
     switch(argTypes[i]) {
       case 'i': {
         int v = va_arg(vl, int);
@@ -25,13 +26,13 @@ void DEBUG(const char* argTypes, ...) {
       default:
         break;
     }
-
-    if (i != 0) Serial.print(", ");
   }
   Serial.println("");
   va_end(vl);
-}
+// #else
+// NOP
 #endif
+}
 
 // Class prototypes
 class Wheel;
@@ -170,13 +171,6 @@ class Car {
       leftWheel->SetSpeed(rotateSpeed);
       rightWheel->SetSpeed(rotateSpeed);
     }
-
-    // Car::Debug()
-    //  Output carState
-    void Debug() {
-      Serial.print("CarState: ");
-      Serial.println(carState);
-    }
 };
 
 class UltraSonic {
@@ -233,6 +227,9 @@ class Led {
   public:
     Led(int8_t pin): pin(pin) {
       pinMode(pin, OUTPUT);
+
+      // Default
+      this->SetBrightness(0);
     }
 
     // Led::SetBrightness()
@@ -263,6 +260,27 @@ void ultraSonicTask(void* pvParameters) {
   // Loop
   for(;;) {
     distanceState = ultraSonic->UpdateDistanceState();
+  }
+}
+
+void lightControlTask(void* pvParameters) {
+  // Setup
+  Led* led = new Led(10);
+  int8_t value = 0;
+
+  // Loop
+  for (;;) {
+    value = analogRead(A0);
+    if (value >= 100) {
+      led->SetBrightness(0);
+    } else if (value >= 60) {
+      led->SetBrightness(75);
+    } else if (value >= 30) {
+      led->SetBrightness(150);
+    } else {
+      led->SetBrightness(255);
+    }
+    vTaskDelay(10);
   }
 }
 
@@ -298,12 +316,13 @@ void controlCenterTask(void* pvParameters) {
   }
 }
 
-
 void setup() {
   Serial.begin(9600);
 
-  xTaskCreate(ultraSonicTask, "UltraSonic", 64, NULL, 2, NULL);
-  xTaskCreate(controlCenterTask, "ControlCenter", 128, NULL, 1, NULL);
+  xTaskCreate(ultraSonicTask, "UltraSonic", 64, NULL, 1, NULL);
+  xTaskCreate(controlCenterTask, "ControlCenter", 128, NULL, 2, NULL);
+  xTaskCreate(lightControlTask, "LightControl", 64, NULL, 1, NULL);
 }
 
-void loop() {}
+void loop() {
+}
