@@ -28,7 +28,7 @@ class Infrared;
 
 // Global shared variables
 int8_t sensorState;
-int8_t timerCounter;
+int8_t timerCounter = -1;
 const int8_t wakeUpPin = 2;
 TaskHandle_t sensorControlTaskHandle = NULL;
 TaskHandle_t carControlTaskHandle = NULL;
@@ -180,9 +180,9 @@ class UltraSonic {
       return distance;
     }
 
-    // UltraSonic::UpdateSensorState()
+    // UltraSonic::GetSensorState()
     //  Measure 10 times, get average distance, then return with new sensorState
-    int8_t UpdateSensorState() {
+    int8_t GetSensorState() {
       float average = 0.0;
       for (int8_t i = 0; i < 10; i++) {
         average += this->Measure();
@@ -252,7 +252,7 @@ void sensorControlTask(void* pvParameters) {
     }
 
     // Detech by ultra sonic
-    newState = ultraSonic->UpdateSensorState();
+    newState = ultraSonic->GetSensorState();
 
     // Not found by ultra sonic, then detect by infrareds
     if (newState == NOT_FOUND) {
@@ -313,6 +313,7 @@ void carControlTask(void* pvParameters) {
       vTaskSuspend(sensorControlTaskHandle);
       vTaskSuspend(NULL);
     }
+    timerCounter = -1;
 
     switch (sensorState) {
       case TOO_CLOSE:
@@ -342,21 +343,43 @@ void carControlTask(void* pvParameters) {
   }
 }
 
+// Bulit-in ISR to count to 10 seconds then suspend all tasks
 ISR(TIMER1_COMPA_vect) {
-  timerCounter++;
-  if (timerCounter == 10) {
-    // Sleep
-    // Serial.println(F("SLEEP"));
-    suspendLightFlag = true;
-    suspendCarFlag = true;
+  if (timerCounter >= 0) {
+    timerCounter++;
+    if (timerCounter == 10) {
+      // Sleep
+      Serial.println(F("SLEEP"));
+      suspendLightFlag = true;
+      suspendCarFlag = true;
+      timerCounter = -1;
+    }
   }
 }
 
+// ISR to wake up all tasks from suspend
 void wakeUp() {
-  // Serial.println(F("WakeUP"));
+  Serial.println(F("WakeUp"));
   xTaskResumeFromISR(sensorControlTaskHandle);
   xTaskResumeFromISR(carControlTaskHandle);
   xTaskResumeFromISR(lightControlTaskHandle);
+}
+
+// Make car turn right continuously until object detected
+void initialSearch() {
+  // Setup
+  Car* car = new Car(5, 4, 3, 6, 7, 8);
+  UltraSonic* ultraSonic = new UltraSonic(13, 12);
+
+  car->Right();
+
+  // Loop
+  for (;;) {
+    if (ultraSonic->GetSensorState() != NOT_FOUND) {
+      Serial.println(F("Object detected! Start following!"));
+      break;
+    }
+  }
 }
 
 void setup() {
@@ -379,8 +402,8 @@ void setup() {
 
   sensorStateUpdated = xSemaphoreCreateBinary();
 
-  // TODO: make turn until object found
-  // initialSearch();
+  // Make turn until object found
+  initialSearch();
 
   xTaskCreate(sensorControlTask, "SensorControl", 64, NULL, 1, &sensorControlTaskHandle);
   xTaskCreate(carControlTask, "CarControl", 128, NULL, 1, &carControlTaskHandle);
