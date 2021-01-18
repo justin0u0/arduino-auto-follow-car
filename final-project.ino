@@ -1,5 +1,38 @@
 // Author: justin0u0<mail@justin0u0.com>
 
+#include <Arduino_FreeRTOS.h>
+#include <semphr.h>
+#include <stdarg.h>
+
+// Debug utilities
+#define DEBUG_MODE
+#ifdef DEBUG_MODE
+void DEBUG(const char* argTypes, ...) {
+  va_list vl;
+  va_start(vl, argTypes);
+  for (int i = 0; argTypes[i] != '\0'; i++) {
+    switch(argTypes[i]) {
+      case 'i': {
+        int v = va_arg(vl, int);
+        Serial.print(v);
+        break;
+      }
+      case 's': {
+        char* s = va_arg(vl, char*);
+        Serial.print(s);
+        break;
+      }
+      default:
+        break;
+    }
+
+    if (i != 0) Serial.print(", ");
+  }
+  Serial.println("");
+  va_end(vl);
+}
+#endif
+
 // Class prototypes
 class Wheel;
 class Car;
@@ -20,14 +53,8 @@ class Infrared;
 #define CAR_LEFT 3
 #define CAR_RIGHT 4
 
-// Global variables
+// Global shared variables
 int8_t distanceState;
-Car* car;
-UltraSonic* ultraSonic;
-Infrared* leftInfrared;
-Infrared* rightInfrared;
-
-unsigned long lastNotFound;
 
 class Wheel {
   private:
@@ -179,22 +206,24 @@ class UltraSonic {
 
     // UltraSonic::GetDistanceState()
     //  Measure 10 times, get average distance, then update distanceState
-    void UpdateDistanceState() {
+    int8_t UpdateDistanceState() {
       float average = 0.0;
       for (int8_t i = 0; i < 10; i++) {
         average += this->Measure();
       }
       average /= 10;
 
+      int8_t state;
       if (average < 12) {
-        distanceState = TOO_CLOSE;
+        state = TOO_CLOSE;
       } else if (average < 18) { // average > 12
-        distanceState = APPROPRIATE;
+        state = APPROPRIATE;
       } else if (average < 35) {
-        distanceState = TOO_FAR;
+        state = TOO_FAR;
       } else {
-        distanceState = NOT_FOUND;
+        state = NOT_FOUND;
       }
+      return state;
     }
 };
 
@@ -227,38 +256,54 @@ class Infrared {
     }
 };
 
-void setup() {
-  Serial.begin(9600);
-  car = new Car(5, 4, 3, 6, 7, 8);
-  ultraSonic = new UltraSonic(13, 12);
-  leftInfrared = new Infrared(2);
-  rightInfrared = new Infrared(9);
+void ultraSonicTask(void* pvParameters) {
+  // Setup
+  UltraSonic* ultraSonic = new UltraSonic(13, 12);
 
-  lastNotFound = -1;
+  // Loop
+  for(;;) {
+    distanceState = ultraSonic->UpdateDistanceState();
+  }
 }
 
-void loop() {
-  ultraSonic->UpdateDistanceState();
+void controlCenterTask(void* pvParameters) {
+  // Setup
+  Car* car = new Car(5, 4, 3, 6, 7, 8);
+  Infrared* leftInfrared = new Infrared(2);
+  Infrared* rightInfrared = new Infrared(9);
 
-  if (distanceState == TOO_CLOSE) {
-    Serial.println("BACK");
-    car->Backward();
-  } else if (distanceState == TOO_FAR) {
-    Serial.println("FORWARD");
-    car->Forward();
-  } else if (distanceState == APPROPRIATE) {
-    Serial.println("STOP");
-    car->Stop();
-  } else {
-    if (leftInfrared->Detect()) {
-      Serial.println("LEFT");
-      car->Left();
-    } else if (rightInfrared->Detect()) {
-      Serial.println("RIGHT");
-      car->Right();
-    } else {
-      Serial.println("STOP");
+  // Loop
+  for (;;) {
+    if (distanceState == TOO_CLOSE) {
+      DEBUG("s", "BACK");
+      car->Backward();
+    } else if (distanceState == TOO_FAR) {
+      DEBUG("s", "FORWARD");
+      car->Forward();
+    } else if (distanceState == APPROPRIATE) {
+      DEBUG("s", "STOP");
       car->Stop();
+    } else {
+      if (leftInfrared->Detect()) {
+        DEBUG("s", "LEFT");
+        car->Left();
+      } else if (rightInfrared->Detect()) {
+        DEBUG("s", "RIGHT");
+        car->Right();
+      } else {
+        DEBUG("s", "STOP");
+        car->Stop();
+      }
     }
   }
 }
+
+
+void setup() {
+  Serial.begin(9600);
+
+  xTaskCreate(ultraSonicTask, "UltraSonic", 64, NULL, 2, NULL);
+  xTaskCreate(controlCenterTask, "ControlCenter", 128, NULL, 1, NULL);
+}
+
+void loop() {}
