@@ -4,36 +4,6 @@
 #include <semphr.h>
 #include <stdarg.h>
 
-// Debug utilities
-#define DEBUG_MODE
-void DEBUG(const char* argTypes, ...) {
-#ifdef DEBUG_MODE
-  va_list vl;
-  va_start(vl, argTypes);
-  for (int i = 0; argTypes[i] != '\0'; i++) {
-    if (i) Serial.print(", ");
-    switch(argTypes[i]) {
-      case 'i': {
-        int v = va_arg(vl, int);
-        Serial.print(v);
-        break;
-      }
-      case 's': {
-        char* s = va_arg(vl, char*);
-        Serial.print(s);
-        break;
-      }
-      default:
-        break;
-    }
-  }
-  Serial.println("");
-  va_end(vl);
-// #else
-// NOP
-#endif
-}
-
 // Class prototypes
 class Wheel;
 class Car;
@@ -58,6 +28,13 @@ class Infrared;
 
 // Global shared variables
 int8_t sensorState;
+int8_t timerCounter;
+const int8_t wakeUpPin = 2;
+TaskHandle_t sensorControlTaskHandle = NULL;
+TaskHandle_t carControlTaskHandle = NULL;
+TaskHandle_t lightControlTaskHandle = NULL;
+bool suspendCarFlag = false;
+bool suspendLightFlag = false;
 
 // Locking
 SemaphoreHandle_t sensorStateUpdated;
@@ -264,12 +241,16 @@ class Infrared {
 void sensorControlTask(void* pvParameters) {
   // Setup
   UltraSonic* ultraSonic = new UltraSonic(13, 12);
-  Infrared* leftInfrared = new Infrared(2);
-  Infrared* rightInfrared = new Infrared(9);
+  Infrared* leftInfrared = new Infrared(A2);
+  Infrared* rightInfrared = new Infrared(A1);
   int8_t newState = -1;
 
   // Loop
   for(;;) {
+    if (suspendCarFlag) {
+      xSemaphoreGive(sensorStateUpdated);
+    }
+
     // Detech by ultra sonic
     newState = ultraSonic->UpdateSensorState();
 
@@ -292,11 +273,17 @@ void sensorControlTask(void* pvParameters) {
 
 void lightControlTask(void* pvParameters) {
   // Setup
-  Led* led = new Led(10);
+  Led* led = new Led(11);
   int8_t value = 0;
 
   // Loop
   for (;;) {
+    if (suspendLightFlag) {
+      led->SetBrightness(0);
+      suspendLightFlag = false;
+      vTaskSuspend(NULL);
+    }
+
     value = analogRead(A0);
     if (value >= 100) {
       led->SetBrightness(0);
@@ -320,6 +307,13 @@ void carControlTask(void* pvParameters) {
     // Wait until sensorState got updated
     xSemaphoreTake(sensorStateUpdated, portMAX_DELAY);
 
+    if (suspendCarFlag) {
+      car->Stop();
+      suspendCarFlag = false;
+      vTaskSuspend(sensorControlTaskHandle);
+      vTaskSuspend(NULL);
+    }
+
     switch (sensorState) {
       case TOO_CLOSE:
         car->Backward();
@@ -337,7 +331,10 @@ void carControlTask(void* pvParameters) {
         car->Right();
         break;
       case NOT_FOUND:
+        // Start count 10 seconds, then sleep
         car->Stop();
+        TCNT1 = 0; // Reset timer
+        timerCounter = 0;
         break;
       default:
         car->Stop();
@@ -345,15 +342,49 @@ void carControlTask(void* pvParameters) {
   }
 }
 
+ISR(TIMER1_COMPA_vect) {
+  timerCounter++;
+  if (timerCounter == 10) {
+    // Sleep
+    // Serial.println(F("SLEEP"));
+    suspendLightFlag = true;
+    suspendCarFlag = true;
+  }
+}
+
+void wakeUp() {
+  // Serial.println(F("WakeUP"));
+  xTaskResumeFromISR(sensorControlTaskHandle);
+  xTaskResumeFromISR(carControlTaskHandle);
+  xTaskResumeFromISR(lightControlTaskHandle);
+}
+
 void setup() {
   Serial.begin(9600);
 
+  // Initialize Timer1, timer1 infect pin 9 and pin 10
+  noInterrupts();
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1 = 0; // Actual timer value
+  OCR1A = 62500; // 16MHZ / 256 * 1
+  TCCR1B |= (1 << WGM12); // Clean Timer on Compare Mode
+  TCCR1B |= (1 << CS12); // Prescaler 256
+  TIMSK1 |= (1 << OCIE1A); // Enable timer compare interrupt
+  interrupts();
+
+  // Setup external wakeup pin
+  pinMode(wakeUpPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(wakeUpPin), wakeUp, CHANGE);
+
   sensorStateUpdated = xSemaphoreCreateBinary();
 
-  xTaskCreate(sensorControlTask, "SensorControl", 64, NULL, 1, NULL);
-  xTaskCreate(carControlTask, "CarControl", 128, NULL, 1, NULL);
-  xTaskCreate(lightControlTask, "LightControl", 64, NULL, 1, NULL);
+  // TODO: make turn until object found
+  // initialSearch();
+
+  xTaskCreate(sensorControlTask, "SensorControl", 64, NULL, 1, &sensorControlTaskHandle);
+  xTaskCreate(carControlTask, "CarControl", 128, NULL, 1, &carControlTaskHandle);
+  xTaskCreate(lightControlTask, "LightControl", 64, NULL, 1, &lightControlTaskHandle);
 }
 
-void loop() {
-}
+void loop() {}
