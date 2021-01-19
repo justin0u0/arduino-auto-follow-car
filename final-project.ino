@@ -52,7 +52,7 @@ class Wheel {
 
       // Default
       this->Stop();
-      this->SetSpeed(170);
+      this->SetSpeed(140);
     }
 
     // Wheel::RotateFront()
@@ -271,6 +271,8 @@ void sensorControlTask(void* pvParameters) {
   }
 }
 
+// lightControlTask
+//  Detect photo resistor, control LED lightness
 void lightControlTask(void* pvParameters) {
   // Setup
   Led* led = new Led(11);
@@ -298,6 +300,9 @@ void lightControlTask(void* pvParameters) {
   }
 }
 
+// carControlTask
+//  Control car movement by sensorState
+//  wait until sensorState updated to execute
 void carControlTask(void* pvParameters) {
   // Setup
   Car* car = new Car(6, 7, 8, 5, 4, 3);
@@ -365,7 +370,8 @@ void wakeUp() {
   xTaskResumeFromISR(lightControlTaskHandle);
 }
 
-// Make car turn right continuously until object detected
+// initialSearch
+//  Make car turn right continuously until object detected
 void initialSearch() {
   // Setup
   Car* car = new Car(6, 7, 8, 5, 4, 3);
