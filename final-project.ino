@@ -52,7 +52,7 @@ class Wheel {
 
       // Default
       this->Stop();
-      this->SetSpeed(255);
+      this->SetSpeed(170);
     }
 
     // Wheel::RotateFront()
@@ -300,7 +300,7 @@ void lightControlTask(void* pvParameters) {
 
 void carControlTask(void* pvParameters) {
   // Setup
-  Car* car = new Car(5, 4, 3, 6, 7, 8);
+  Car* car = new Car(6, 7, 8, 5, 4, 3);
 
   // Loop
   for (;;) {
@@ -368,7 +368,7 @@ void wakeUp() {
 // Make car turn right continuously until object detected
 void initialSearch() {
   // Setup
-  Car* car = new Car(5, 4, 3, 6, 7, 8);
+  Car* car = new Car(6, 7, 8, 5, 4, 3);
   UltraSonic* ultraSonic = new UltraSonic(13, 12);
 
   car->Right();
