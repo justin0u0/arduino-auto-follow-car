@@ -1,5 +1,9 @@
 // Author: justin0u0<mail@justin0u0.com>
 
+#include <Arduino_FreeRTOS.h>
+#include <semphr.h>
+#include <stdarg.h>
+
 // Class prototypes
 class Wheel;
 class Car;
@@ -8,11 +12,13 @@ class Led;
 class Infrared;
 
 // Defines
-// Distance states
+// Sensor states
 #define NOT_FOUND 0
 #define TOO_FAR 1
 #define TOO_CLOSE 2
 #define APPROPRIATE 3
+#define TOO_LEFT 4
+#define TOO_RIGHT 5
 // Car states
 #define CAR_FORWARD 0
 #define CAR_BACKWARD 1
@@ -20,14 +26,18 @@ class Infrared;
 #define CAR_LEFT 3
 #define CAR_RIGHT 4
 
-// Global variables
-int8_t distanceState;
-Car* car;
-UltraSonic* ultraSonic;
-Infrared* leftInfrared;
-Infrared* rightInfrared;
+// Global shared variables
+int8_t sensorState;
+int8_t timerCounter = -1;
+const int8_t wakeUpPin = 2;
+TaskHandle_t sensorControlTaskHandle = NULL;
+TaskHandle_t carControlTaskHandle = NULL;
+TaskHandle_t lightControlTaskHandle = NULL;
+bool suspendCarFlag = false;
+bool suspendLightFlag = false;
 
-unsigned long lastNotFound;
+// Locking
+SemaphoreHandle_t sensorStateUpdated;
 
 class Wheel {
   private:
@@ -42,7 +52,7 @@ class Wheel {
 
       // Default
       this->Stop();
-      this->SetSpeed(255);
+      this->SetSpeed(170);
     }
 
     // Wheel::RotateFront()
@@ -143,13 +153,6 @@ class Car {
       leftWheel->SetSpeed(rotateSpeed);
       rightWheel->SetSpeed(rotateSpeed);
     }
-
-    // Car::Debug()
-    //  Output carState
-    void Debug() {
-      Serial.print("CarState: ");
-      Serial.println(carState);
-    }
 };
 
 class UltraSonic {
@@ -177,24 +180,26 @@ class UltraSonic {
       return distance;
     }
 
-    // UltraSonic::GetDistanceState()
-    //  Measure 10 times, get average distance, then update distanceState
-    void UpdateDistanceState() {
+    // UltraSonic::GetSensorState()
+    //  Measure 10 times, get average distance, then return with new sensorState
+    int8_t GetSensorState() {
       float average = 0.0;
       for (int8_t i = 0; i < 10; i++) {
         average += this->Measure();
       }
       average /= 10;
 
+      int8_t state;
       if (average < 12) {
-        distanceState = TOO_CLOSE;
+        state = TOO_CLOSE;
       } else if (average < 18) { // average > 12
-        distanceState = APPROPRIATE;
+        state = APPROPRIATE;
       } else if (average < 35) {
-        distanceState = TOO_FAR;
+        state = TOO_FAR;
       } else {
-        distanceState = NOT_FOUND;
+        state = NOT_FOUND;
       }
+      return state;
     }
 };
 
@@ -204,6 +209,9 @@ class Led {
   public:
     Led(int8_t pin): pin(pin) {
       pinMode(pin, OUTPUT);
+
+      // Default
+      this->SetBrightness(0);
     }
 
     // Led::SetBrightness()
@@ -227,38 +235,179 @@ class Infrared {
     }
 };
 
-void setup() {
-  Serial.begin(9600);
-  car = new Car(5, 4, 3, 6, 7, 8);
-  ultraSonic = new UltraSonic(13, 12);
-  leftInfrared = new Infrared(2);
-  rightInfrared = new Infrared(9);
+// sensorControlTask
+//  Ultra sonic, infrared control task
+//  signal carControlTask if sensorState changed
+void sensorControlTask(void* pvParameters) {
+  // Setup
+  UltraSonic* ultraSonic = new UltraSonic(13, 12);
+  Infrared* leftInfrared = new Infrared(A2);
+  Infrared* rightInfrared = new Infrared(A1);
+  int8_t newState = -1;
 
-  lastNotFound = -1;
-}
+  // Loop
+  for(;;) {
+    if (suspendCarFlag) {
+      xSemaphoreGive(sensorStateUpdated);
+    }
 
-void loop() {
-  ultraSonic->UpdateDistanceState();
+    // Detech by ultra sonic
+    newState = ultraSonic->GetSensorState();
 
-  if (distanceState == TOO_CLOSE) {
-    Serial.println("BACK");
-    car->Backward();
-  } else if (distanceState == TOO_FAR) {
-    Serial.println("FORWARD");
-    car->Forward();
-  } else if (distanceState == APPROPRIATE) {
-    Serial.println("STOP");
-    car->Stop();
-  } else {
-    if (leftInfrared->Detect()) {
-      Serial.println("LEFT");
-      car->Left();
-    } else if (rightInfrared->Detect()) {
-      Serial.println("RIGHT");
-      car->Right();
-    } else {
-      Serial.println("STOP");
-      car->Stop();
+    // Not found by ultra sonic, then detect by infrareds
+    if (newState == NOT_FOUND) {
+      if (leftInfrared->Detect()) {
+        newState = TOO_LEFT;
+      } else if (rightInfrared->Detect()) {
+        newState = TOO_RIGHT;
+      }
+    }
+
+    // Signal carControlTask
+    if (sensorState != newState) {
+      sensorState = newState;
+      xSemaphoreGive(sensorStateUpdated);
     }
   }
 }
+
+void lightControlTask(void* pvParameters) {
+  // Setup
+  Led* led = new Led(11);
+  int8_t value = 0;
+
+  // Loop
+  for (;;) {
+    if (suspendLightFlag) {
+      led->SetBrightness(0);
+      suspendLightFlag = false;
+      vTaskSuspend(NULL);
+    }
+
+    value = analogRead(A0);
+    if (value >= 100) {
+      led->SetBrightness(0);
+    } else if (value >= 60) {
+      led->SetBrightness(75);
+    } else if (value >= 30) {
+      led->SetBrightness(150);
+    } else {
+      led->SetBrightness(255);
+    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+}
+
+void carControlTask(void* pvParameters) {
+  // Setup
+  Car* car = new Car(6, 7, 8, 5, 4, 3);
+
+  // Loop
+  for (;;) {
+    // Wait until sensorState got updated
+    xSemaphoreTake(sensorStateUpdated, portMAX_DELAY);
+
+    if (suspendCarFlag) {
+      car->Stop();
+      suspendCarFlag = false;
+      vTaskSuspend(sensorControlTaskHandle);
+      vTaskSuspend(NULL);
+    }
+    timerCounter = -1;
+
+    switch (sensorState) {
+      case TOO_CLOSE:
+        car->Backward();
+        break;
+      case TOO_FAR:
+        car->Forward();
+        break;
+      case APPROPRIATE:
+        car->Stop();
+        break;
+      case TOO_LEFT:
+        car->Left();
+        break;
+      case TOO_RIGHT:
+        car->Right();
+        break;
+      case NOT_FOUND:
+        // Start count 10 seconds, then sleep
+        car->Stop();
+        TCNT1 = 0; // Reset timer
+        timerCounter = 0;
+        break;
+      default:
+        car->Stop();
+    }
+  }
+}
+
+// Bulit-in ISR to count to 10 seconds then suspend all tasks
+ISR(TIMER1_COMPA_vect) {
+  if (timerCounter >= 0) {
+    timerCounter++;
+    if (timerCounter == 10) {
+      // Sleep
+      Serial.println(F("SLEEP"));
+      suspendLightFlag = true;
+      suspendCarFlag = true;
+      timerCounter = -1;
+    }
+  }
+}
+
+// ISR to wake up all tasks from suspend
+void wakeUp() {
+  Serial.println(F("WakeUp"));
+  xTaskResumeFromISR(sensorControlTaskHandle);
+  xTaskResumeFromISR(carControlTaskHandle);
+  xTaskResumeFromISR(lightControlTaskHandle);
+}
+
+// Make car turn right continuously until object detected
+void initialSearch() {
+  // Setup
+  Car* car = new Car(6, 7, 8, 5, 4, 3);
+  UltraSonic* ultraSonic = new UltraSonic(13, 12);
+
+  car->Right();
+
+  // Loop
+  for (;;) {
+    if (ultraSonic->GetSensorState() != NOT_FOUND) {
+      Serial.println(F("Object detected! Start following!"));
+      break;
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+
+  // Initialize Timer1, timer1 infect pin 9 and pin 10
+  noInterrupts();
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1 = 0; // Actual timer value
+  OCR1A = 62500; // 16MHZ / 256 * 1
+  TCCR1B |= (1 << WGM12); // Clean Timer on Compare Mode
+  TCCR1B |= (1 << CS12); // Prescaler 256
+  TIMSK1 |= (1 << OCIE1A); // Enable timer compare interrupt
+  interrupts();
+
+  // Setup external wakeup pin
+  pinMode(wakeUpPin, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(wakeUpPin), wakeUp, CHANGE);
+
+  sensorStateUpdated = xSemaphoreCreateBinary();
+
+  // Make turn until object found
+  initialSearch();
+
+  xTaskCreate(sensorControlTask, "SensorControl", 64, NULL, 1, &sensorControlTaskHandle);
+  xTaskCreate(carControlTask, "CarControl", 128, NULL, 1, &carControlTaskHandle);
+  xTaskCreate(lightControlTask, "LightControl", 64, NULL, 1, &lightControlTaskHandle);
+}
+
+void loop() {}
